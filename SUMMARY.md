@@ -7,6 +7,7 @@ The project uses a **Tree Architecture** for generic, reusable RL environments:
 - **Generic_Base/**: Hardware-agnostic Phase 4 code (v1.0.0)
 - **Environments/**: Completed environment branches (nodes)
   - **Accelerometer_Env/**: ISM330DHCX accelerometer RL environment
+  - **Latency_Test_Env/**: Hardware-in-the-loop (HIL) latency testing
 
 ---
 
@@ -40,6 +41,30 @@ Machine-readable state telemetry for RL environment:
   - 'A': Toggle Green LED, update last_action to 'A'
   - 'B': Update last_action to 'B'
 - **UART:** Non-blocking polling method per LESSONS_LEARNED
+
+---
+
+### Latency_Test_Env (Staged)
+
+**Hardware-in-the-loop (HIL) testing environment**
+
+**Date:** 2026-04-01 (Staged)
+
+sigrok-cli based latency profiler for measuring RL loop timing:
+
+#### Latency Profiling (v0.0.1)
+- **verify_latency.py**: Automated sigrok-cli profiler
+- **Configuration**: 24MHz sample rate, 240k samples, Ch0 falling edge trigger
+- **Measurement**: UART frame end to GPIO response time delta
+- **Status**: Staged - awaiting logic analyzer hardware
+
+#### sigrok-cli Parameters
+| Parameter | Value |
+|-----------|-------|
+| Sample Rate | 24 MHz |
+| Samples | 240,000 |
+| Trigger | Channel 0, Falling Edge |
+| Output | CSV |
 
 ---
 
@@ -81,10 +106,20 @@ Generic_Base/                    # Hardware-agnostic base (v1.0.0)
 └── STM32U585AIIXQ_FLASH.ld
 
 Environments/
-└── Accelerometer_Env/          # First completed node
-    ├── Core/Src/main.c          # Phase 5/6 working code
-    ├── RL_Brain/agent.py        # Python threshold policy agent
-    ├── test_tilt.py             # Tilt detection test script
-    ├── Dell_2_Steval.ioc        # CubeMX configuration
-    └── STM32U585AIIXQ_FLASH.ld  # Linker script
+├── Accelerometer_Env/          # Completed: Tilt detection RL
+│   ├── Core/Src/main.c          # Phase 5/6 working code
+│   ├── RL_Brain/agent.py        # Python threshold policy agent
+│   ├── test_tilt.py             # Tilt detection test script
+│   └── README.md                # Environment documentation
+│
+└── Latency_Test_Env/           # Staged: HIL latency testing
+    ├── Core/Src/main.c          # Generic_Base firmware
+    ├── verify_latency.py         # sigrok-cli profiler script
+    └── README.md                # Environment documentation
 ```
+
+## Roadmap: Next Phase
+
+After Latency_Test_Env validation:
+- Integrate next sensor (Gyroscope or Magnetometer) into new environment branch
+- Use latency measurements to validate RL loop timing requirements
