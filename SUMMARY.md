@@ -8,6 +8,7 @@ The project uses a **Tree Architecture** for generic, reusable RL environments:
 - **Environments/**: Completed environment branches (nodes)
   - **Accelerometer_Env/**: ISM330DHCX accelerometer RL environment
   - **Latency_Test_Env/**: Hardware-in-the-loop (HIL) latency testing
+  - **Battery_Monitor_Env/**: ADC battery voltage monitoring
 
 ---
 
@@ -41,6 +42,33 @@ Machine-readable state telemetry for RL environment:
   - 'A': Toggle Green LED, update last_action to 'A'
   - 'B': Update last_action to 'B'
 - **UART:** Non-blocking polling method per LESSONS_LEARNED
+
+---
+
+### Battery_Monitor_Env (v0.0.2)
+
+**STBC02 Battery Charger Driver Integration**
+
+**Date:** 2026-04-04
+
+STBC02 battery monitoring with voltage, level percentage, and charging state:
+
+#### Battery Monitoring (v0.0.2)
+- **Driver**: STBC02 Battery Charger BSP driver from BASE_one
+- **Implementation**: STBC02-style API wrappers using ADC1 channel 3 (PC2)
+- **Voltage Range**: 3250mV (min) to 4225mV (max)
+- **CSV Format**: `STATE,<TickCount>,<LastAction>,<Voltage_mV>,<Level_Pct>,<Status_Id>`
+- **Status States** (via CHG pin frequency detection):
+  - 0 = NotValidInput, 1 = ValidInput, 2 = VbatLow, 3 = EndOfCharge
+  - 4 = ChargingPhase, 5 = OverchargeFault, 6 = ChargingTimeout
+  - 7 = BatteryVoltageBelowVpre, 8 = ChargingThermalLimitation
+  - 9 = BatteryTemperatureFault
+- **Threshold Policy**: Level < 20% AND NOT Charging -> 'A' (Power Save), Otherwise -> 'B' (Normal)
+- **Status**: Firmware working, battery reads 3250mV (minimum - no battery or depleted)
+
+#### Previous Implementation (v0.0.1)
+- Raw ADC1 approach with voltage divider formula
+- 4-element CSV format: `STATE,<TickCount>,<LastAction>,<Battery_mV>`
 
 ---
 
@@ -112,9 +140,14 @@ Environments/
 │   ├── test_tilt.py             # Tilt detection test script
 │   └── README.md                # Environment documentation
 │
-└── Latency_Test_Env/           # Staged: HIL latency testing
-    ├── Core/Src/main.c          # Generic_Base firmware
-    ├── verify_latency.py         # sigrok-cli profiler script
+├── Latency_Test_Env/           # Staged: HIL latency testing
+│   ├── Core/Src/main.c          # Generic_Base firmware
+│   ├── verify_latency.py        # sigrok-cli profiler script
+│   └── README.md                # Environment documentation
+│
+└── Battery_Monitor_Env/       # ADC battery voltage monitoring
+    ├── Core/Src/main.c          # ADC battery monitoring code
+    ├── RL_Brain/agent.py        # Battery threshold policy agent
     └── README.md                # Environment documentation
 ```
 

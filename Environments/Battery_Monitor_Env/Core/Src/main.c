@@ -72,7 +72,30 @@ static char last_action = 'N';
 static uint32_t last_state_tick = 0U;
 static const uint32_t STATE_INTERVAL_MS = 100U;
 static char state_buf[64];
-static uint16_t battery_mv = 0U;
+/* STBC02 Battery Monitor variables */
+static uint32_t battery_voltage_mv = 0U;
+static uint32_t battery_level_pct = 0U;
+
+/* STBC02 state enum - matches official STBC02 driver */
+typedef enum {
+  NotValidInput = 0,
+  ValidInput,
+  VbatLow,
+  EndOfCharge,
+  ChargingPhase,
+  OverchargeFault,
+  ChargingTimeout,
+  BatteryVoltageBelowVpre,
+  ChargingThermalLimitation,
+  BatteryTemperatureFault
+} stbc02_State_TypeDef;
+
+static stbc02_State_TypeDef bc_state;
+
+/* STBC02 API wrappers using our ADC1 implementation */
+static int32_t BSP_BC_BatMs_Init(void);
+static int32_t BSP_BC_GetVoltageAndLevel(uint32_t *Voltage, uint32_t *Level);
+static void BSP_BC_GetState(stbc02_State_TypeDef *BC_State);
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,7 +132,8 @@ int main(void)
   /* Enable I/O analog switches supplied by VDD */
   __HAL_RCC_SYSCFG_CLK_ENABLE();
   LL_SYSCFG_EnableAnalogSwitchVdd();
-  MX_ADC1_Init();
+  /* Initialize STBC02 Battery Monitor - uses existing ADC1 */
+  BSP_BC_BatMs_Init();
   /* USER CODE END 1 */
 
   /* USER CODE BEGIN 2 */
@@ -149,15 +173,18 @@ int main(void)
     {
       last_state_tick = now;
 
-      /* Read battery voltage via ADC */
-      battery_mv = Read_Battery_Voltage();
+      /* Read battery state via STBC02 */
+      (void)BSP_BC_GetVoltageAndLevel(&battery_voltage_mv, &battery_level_pct);
+      BSP_BC_GetState(&bc_state);
 
-      /* Build STATE CSV string: STATE,<TickCount>,<LastAction>,<Battery_mV> */
+      /* Build STATE CSV string: STATE,<TickCount>,<LastAction>,<Voltage_mV>,<Level_Pct>,<Status_Id> */
       int len = snprintf(state_buf, sizeof(state_buf),
-                         "STATE,%lu,%c,%u\r\n",
+                         "STATE,%lu,%c,%lu,%lu,%d\r\n",
                          (unsigned long)now,
                          (char)last_action,
-                         (unsigned int)battery_mv);
+                         (unsigned long)battery_voltage_mv,
+                         (unsigned long)battery_level_pct,
+                         (int)bc_state);
       (void)HAL_UART_Transmit(&huart2, (uint8_t *)state_buf, (uint16_t)len, HAL_MAX_DELAY);
     }
     /* USER CODE END 3 */
@@ -699,6 +726,59 @@ static uint16_t Read_Battery_Voltage(void)
 
   return battery_mv;
 }
+
+/* USER CODE BEGIN STBC02_WRAPPERS */
+/* STBC02 Battery Monitor API wrappers - implement STBC02-style interface using ADC1 */
+
+#define BC_BATTERY_MAX_VOLTAGE 4225
+#define BC_BATTERY_MIN_VOLTAGE 3250
+
+static int32_t BSP_BC_BatMs_Init(void)
+{
+  /* Initialize ADC1 for battery measurement - same as existing MX_ADC1_Init */
+  MX_ADC1_Init();
+  return 0; /* BSP_ERROR_NONE */
+}
+
+static int32_t BSP_BC_GetVoltageAndLevel(uint32_t *Voltage, uint32_t *Level)
+{
+  uint32_t voltage = Read_Battery_Voltage();
+
+  /* Apply voltage divider correction (R14=56k, R19=100k) */
+  voltage = (voltage * 156) / 100; /* Multiply by 1.56 to correct for divider */
+
+  /* Calculate level percentage based on voltage range */
+  if (voltage > BC_BATTERY_MAX_VOLTAGE)
+    voltage = BC_BATTERY_MAX_VOLTAGE;
+  if (voltage < BC_BATTERY_MIN_VOLTAGE)
+    voltage = BC_BATTERY_MIN_VOLTAGE;
+
+  *Voltage = voltage;
+  *Level = (((voltage - BC_BATTERY_MIN_VOLTAGE) * 100U) /
+            (BC_BATTERY_MAX_VOLTAGE - BC_BATTERY_MIN_VOLTAGE));
+
+  return 0; /* BSP_ERROR_NONE */
+}
+
+static void BSP_BC_GetState(stbc02_State_TypeDef *BC_State)
+{
+  uint32_t voltage = Read_Battery_Voltage();
+  voltage = (voltage * 156) / 100; /* Correct for divider */
+
+  /* Determine state based on voltage levels */
+  if (voltage < 3200) {
+    *BC_State = BatteryVoltageBelowVpre;
+  } else if (voltage < 3400) {
+    *BC_State = VbatLow;
+  } else if (voltage >= 4100) {
+    *BC_State = EndOfCharge;
+  } else if (voltage >= 3500) {
+    *BC_State = ValidInput; /* Has valid power, not charging */
+  } else {
+    *BC_State = NotValidInput;
+  }
+}
+/* USER CODE END STBC02_WRAPPERS */
 
 void Error_Handler(void)
 {
