@@ -8,7 +8,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32u5xx_ll_system.h"
 #include <stdio.h>
 
 /* USER CODE BEGIN PD */
@@ -20,6 +19,22 @@
 
 #define UART2_BAUD            115200u
 #define ERROR_BLINK_MS        100U
+
+/* STTS22H Temperature Sensor I2C Configuration */
+#define TEMP_I2C              hi2c2
+#define TEMP_SENSOR_ADDR     0x3F  /* STTS22H I2C address (7-bit) */
+#define TEMP_I2C_TIMEOUT      100   /* ms */
+
+/* STTS22H Register Addresses */
+#define STTS22H_WHO_AM_I      0x01
+#define STTS22H_WHO_AM_I_VAL  0xA0  /* Should return 0xA0 */
+#define STTS22H_STATUS        0x05
+#define STTS22H_STATUS_NOT_READY  0x00
+#define STTS22H_STATUS_READY      0x01
+#define STTS22H_TEMP_L        0x06  /* Temperature low byte */
+#define STTS22H_TEMP_H        0x07  /* Temperature high byte */
+#define STTS22H_CTRL          0x04  /* CTRL register - correct address! */
+#define STTS22H_CTRL_FREE_RUN 0x0C  /* Free-run (bit 2) + IF_ADD_INC (bit 3) */
 /* Force Cube-generated USART2 init to use TX/RX only (PD5/PD6). */
 #undef UART_HWCONTROL_RTS
 #define UART_HWCONTROL_RTS    UART_HWCONTROL_NONE
@@ -70,9 +85,13 @@ DMA_HandleTypeDef handle_GPDMA1_Channel0;
 static uint8_t rx_byte;
 static char last_action = 'N';
 static uint32_t last_state_tick = 0U;
-static const uint32_t STATE_INTERVAL_MS = 100U;
+static const uint32_t STATE_INTERVAL_MS = 1000U;  /* Print every 1 second */
 static char state_buf[64];
-static uint16_t battery_mv = 0U;
+
+/* STTS22H Temperature Sensor Variables */
+static I2C_HandleTypeDef TEMP_I2C;
+static uint8_t temp_sensor_ok = 0;
+static int16_t current_temp_x100 = 0;  /* Temperature in °C * 100 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -91,8 +110,10 @@ static uint8_t ISM330DHCX_ReadReg(uint8_t reg);
 static void ISM330DHCX_WriteReg(uint8_t reg, uint8_t val);
 static uint8_t ISM330DHCX_Init(void);
 static void ISM330DHCX_ReadAccel(int16_t *ax, int16_t *ay, int16_t *az);
-static void MX_ADC1_Init(void);
-static uint16_t Read_Battery_Voltage(void);
+
+/* STTS22H Temperature Sensor Functions */
+static int32_t STTS22H_I2C_Init(void);
+static int32_t STTS22H_ReadTemperature(int16_t *temp_x100);
 
 int main(void)
 {
@@ -105,13 +126,6 @@ int main(void)
   MX_SPI3_Init();
   BlueNRG_GPIO_Init();
 
-  /* USER CODE BEGIN 1 */
-  /* Enable I/O analog switches supplied by VDD */
-  __HAL_RCC_SYSCFG_CLK_ENABLE();
-  LL_SYSCFG_EnableAnalogSwitchVdd();
-  MX_ADC1_Init();
-  /* USER CODE END 1 */
-
   /* USER CODE BEGIN 2 */
   /* Start with Green LED off */
   HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
@@ -121,6 +135,11 @@ int main(void)
 
   /* Suppress unused variable warnings */
   (void)rx_byte;
+
+  /* Initialize STTS22H Temperature Sensor via I2C2 */
+  if (STTS22H_I2C_Init() == 0) {
+    temp_sensor_ok = 1;
+  }
 
   /* Send ready message */
   (void)HAL_UART_Transmit(&huart2, (uint8_t *)"RL State Vector Ready\r\n", 21, HAL_MAX_DELAY);
@@ -149,15 +168,21 @@ int main(void)
     {
       last_state_tick = now;
 
-      /* Read battery voltage via ADC */
-      battery_mv = Read_Battery_Voltage();
+      /* Read temperature from STTS22H */
+      int16_t temp_x100 = 0;
+      if (temp_sensor_ok) {
+        if (STTS22H_ReadTemperature(&temp_x100) == 0) {
+          current_temp_x100 = temp_x100;
+        }
+      }
 
-      /* Build STATE CSV string: STATE,<TickCount>,<LastAction>,<Battery_mV> */
+      /* Build STATE CSV string: STATE,<Tick>,<Action>,<Temp_x100>,<Status> */
       int len = snprintf(state_buf, sizeof(state_buf),
-                         "STATE,%lu,%c,%u\r\n",
+                         "STATE,%lu,%c,%d,%d\r\n",
                          (unsigned long)now,
                          (char)last_action,
-                         (unsigned int)battery_mv);
+                         (int)current_temp_x100,
+                         (int)temp_sensor_ok);
       (void)HAL_UART_Transmit(&huart2, (uint8_t *)state_buf, (uint16_t)len, HAL_MAX_DELAY);
     }
     /* USER CODE END 3 */
@@ -609,96 +634,163 @@ static void ISM330DHCX_ReadAccel(int16_t *ax, int16_t *ay, int16_t *az)
   *az = (int16_t)((rx[6] << 8) | rx[5]);
 }
 
-/* ADC Handle declared in main.h or here */
-ADC_HandleTypeDef hadc1;
-
-/* Battery voltage divider: R14=56k, R19=100k, ratio = (56+100)/56 = 2.786
- * But user specified multiplier of 1.56f - using that for consistency
- * ADC full scale = 4095 at VDDA (typically 3.3V = 3300mV) */
-#define VDDA_MV        3300U
-#define ADC_FULL_SCALE  4095U
-#define BATT_MULTIPLIER 1.56f
-
-static void MX_ADC1_Init(void)
+/* USER CODE BEGIN STTS22H_FUNCTIONS */
+/**
+ * @brief  Initialize I2C2 for STTS22H temperature sensor
+ * @retval 0 on success, -1 on failure
+ */
+static int32_t STTS22H_I2C_Init(void)
 {
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* Enable ADC clock */
-  __HAL_RCC_ADC12_CLK_ENABLE();
-
-  /* Enable GPIOC clock for PC2 (battery sense) */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-
-  /* Configure PC2 as analog mode for ADC */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  GPIO_InitStruct.Pin = GPIO_PIN_2;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+  int32_t ret = -1;
 
-  /* ADC1 configuration */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.GainCompensation = 0;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.LowPowerAutoPowerOff = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.TriggerFrequencyMode = ADC_TRIGGER_FREQ_HIGH;
+  /* Configure I2C2 clock source to PCLK1 */
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_I2C2;
+  PeriphClkInit.I2c2ClockSelection = RCC_I2C2CLKSOURCE_PCLK1;
+  HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
 
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  /* Enable clocks for I2C2 and required GPIOs */
+  __HAL_RCC_I2C2_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+
+  /* Configure I2C2 GPIO pins: PF0 = SDA, PH4 = SCL */
+  /* PF0 = I2C2_SDA */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;         /* BASE_one uses PULLUP */
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW; /* BASE_one uses LOW */
+  GPIO_InitStruct.Alternate = GPIO_AF4_I2C2;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+
+  /* PH4 = I2C2_SCL */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;         /* BASE_one uses PULLUP */
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW; /* BASE_one uses LOW */
+  GPIO_InitStruct.Alternate = GPIO_AF4_I2C2;
+  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+
+  /* Initialize I2C2 in Master mode - timing from BASE_one MX_I2C2_Init */
+  TEMP_I2C.Instance = I2C2;
+  TEMP_I2C.Init.Timing = 0x00F07BFF;  /* BASE_one timing value */
+  TEMP_I2C.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  TEMP_I2C.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  TEMP_I2C.Init.OwnAddress1 = 0x00;
+  TEMP_I2C.Init.OwnAddress2 = 0x00;
+  TEMP_I2C.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  TEMP_I2C.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  TEMP_I2C.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+
+  if (HAL_I2C_Init(&TEMP_I2C) == HAL_OK)
   {
-    Error_Handler();
-  }
-
-  /* Run ADC calibration for better accuracy */
-  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /* Configure ADC channel 3 (PC2) with long sample time for high impedance */
-  sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_391CYCLES_5;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-static uint16_t Read_Battery_Voltage(void)
-{
-  uint32_t raw_adc = 0;
-  uint16_t battery_mv = 0;
-
-  /* Start ADC conversion */
-  if (HAL_ADC_Start(&hadc1) == HAL_OK)
-  {
-    /* Poll for conversion complete */
-    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
+    /* Configure analog filter as BASE_one does */
+    if (HAL_I2CEx_ConfigAnalogFilter(&TEMP_I2C, I2C_ANALOGFILTER_ENABLE) == HAL_OK)
     {
-      raw_adc = HAL_ADC_GetValue(&hadc1);
+      /* LED ON - I2C and analog filter OK */
+      HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
 
-      /* Calculate battery voltage in millivolts
-       * Formula: battery_mv = (raw_adc * VDDA * multiplier) / ADC_full_scale
-       * User specified: battery_mv = (raw_adc * 3300 * 1.56) / 4095 */
-      battery_mv = (uint16_t)((raw_adc * VDDA_MV * BATT_MULTIPLIER) / ADC_FULL_SCALE);
+      /* Try reading WHO_AM_I register from STTS22H at address 0x3F (7-bit) = 0x7E (8-bit) */
+      uint8_t whoami = 0;
+      char dbg[48];
+      int len;
+
+      len = snprintf(dbg, sizeof(dbg), "Reading WHO_AM_I @ 0x7E...\r\n");
+      HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
+
+      if (HAL_I2C_Mem_Read(&TEMP_I2C, 0x7E, STTS22H_WHO_AM_I,
+                           I2C_MEMADD_SIZE_8BIT, &whoami, 1, TEMP_I2C_TIMEOUT) == HAL_OK)
+      {
+        len = snprintf(dbg, sizeof(dbg), "WHO_AM_I = 0x%02X (expect 0xA0)\r\n", whoami);
+        HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
+
+        if (whoami == STTS22H_WHO_AM_I_VAL)
+        {
+          /* Sensor confirmed! Configure for continuous conversion */
+          uint8_t ctrl = STTS22H_CTRL_FREE_RUN;
+          if (HAL_I2C_Mem_Write(&TEMP_I2C, 0x7E, STTS22H_CTRL,
+                                I2C_MEMADD_SIZE_8BIT, &ctrl, 1, TEMP_I2C_TIMEOUT) == HAL_OK)
+          {
+            len = snprintf(dbg, sizeof(dbg), "STTS22H: Configured OK\r\n");
+            HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
+            ret = 0;
+          }
+        }
+        else
+        {
+          len = snprintf(dbg, sizeof(dbg), "STTS22H: Wrong ID\r\n");
+          HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
+        }
+      }
+      else
+      {
+        len = snprintf(dbg, sizeof(dbg), "WHO_AM_I: No ACK\r\n");
+        HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
+
+        /* LED blinks twice - sensor not found */
+        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+        HAL_Delay(100);
+        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+        HAL_Delay(100);
+        HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+      }
+    }
+    else
+    {
+      char dbg[32];
+      int len = snprintf(dbg, sizeof(dbg), "I2C Analog Filter FAIL\r\n");
+      HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
     }
   }
+  else
+  {
+    char dbg[32];
+    int len = snprintf(dbg, sizeof(dbg), "I2C Init FAIL\r\n");
+    HAL_UART_Transmit(&huart2, (uint8_t *)dbg, len, HAL_MAX_DELAY);
+  }
 
-  return battery_mv;
+  return ret;
 }
+
+/**
+ * @brief  Read temperature from STTS22H
+ * @param  temp_x100: pointer to receive temperature in °C * 100
+ * @retval 0 on success, -1 on failure
+ */
+static int32_t STTS22H_ReadTemperature(int16_t *temp_x100)
+{
+  uint8_t temp_l = 0, temp_h = 0;
+  HAL_StatusTypeDef ret;
+
+  /* Read TEMP_L register (0x06) first */
+  ret = HAL_I2C_Mem_Read(&TEMP_I2C, 0x7E, STTS22H_TEMP_L,
+                       I2C_MEMADD_SIZE_8BIT, &temp_l, 1, TEMP_I2C_TIMEOUT);
+
+  if (ret != HAL_OK)
+  {
+    return -1;
+  }
+
+  /* Read TEMP_H register (0x07) */
+  ret = HAL_I2C_Mem_Read(&TEMP_I2C, 0x7E, STTS22H_TEMP_H,
+                       I2C_MEMADD_SIZE_8BIT, &temp_h, 1, TEMP_I2C_TIMEOUT);
+
+  if (ret != HAL_OK)
+  {
+    return -1;
+  }
+
+  /* STTS22H temperature conversion (from reference driver stts22h_reg.c):
+   * raw = (TEMP_H << 8) | TEMP_L
+   * temp_C = raw / 100.0f (NOT 256!)
+   * So raw IS the temperature in centi-degrees! */
+  int16_t raw = (int16_t)((temp_h << 8) | temp_l);
+  *temp_x100 = raw;  /* raw is already in centi-degrees (e.g., 2800 = 28.00°C) */
+
+  return 0;
+}
+/* USER CODE END STTS22H_FUNCTIONS */
 
 void Error_Handler(void)
 {

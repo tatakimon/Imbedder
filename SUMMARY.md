@@ -9,6 +9,7 @@ The project uses a **Tree Architecture** for generic, reusable RL environments:
   - **Accelerometer_Env/**: ISM330DHCX accelerometer RL environment
   - **Latency_Test_Env/**: Hardware-in-the-loop (HIL) latency testing
   - **Battery_Monitor_Env/**: ADC battery voltage monitoring
+  - **Temperature_Env/**: STTS22H temperature sensor (I2C) - PARTIAL (FW OK, sensor HW issue)
 
 ---
 
@@ -69,6 +70,25 @@ STBC02 battery monitoring with voltage, level percentage, and charging state:
 #### Previous Implementation (v0.0.1)
 - Raw ADC1 approach with voltage divider formula
 - 4-element CSV format: `STATE,<TickCount>,<LastAction>,<Battery_mV>`
+
+---
+
+### Temperature_Env (v0.0.2 - PARTIAL)
+
+**STTS22H Temperature Sensor via I2C2**
+
+**Date:** 2026-04-07
+
+STTS22H temperature sensor integration via I2C2:
+
+#### Temperature Monitoring (v0.0.2)
+- **Driver**: STTS22H I2C temperature sensor
+- **Implementation**: Manual I2C2 initialization (PF0=SDA, PH4=SCL)
+- **I2C Address**: 0x3A (7-bit)
+- **CSV Format**: `STATE,<TickCount>,<LastAction>,<Temp_x100>,<Status>`
+- **Status**: 1 = sensor OK, 0 = sensor init failed
+- **Temperature**: Integer °C × 100 (e.g., 2350 = 23.50°C)
+- **Status**: PARTIAL - Firmware streaming correct CSV but STTS22H sensor not initializing (I2C hardware issue). Sensor returns status=0, temp=0. Need hardware debug of I2C bus.
 
 ---
 
@@ -145,9 +165,13 @@ Environments/
 │   ├── verify_latency.py        # sigrok-cli profiler script
 │   └── README.md                # Environment documentation
 │
-└── Battery_Monitor_Env/       # ADC battery voltage monitoring
-    ├── Core/Src/main.c          # ADC battery monitoring code
-    ├── RL_Brain/agent.py        # Battery threshold policy agent
+├── Battery_Monitor_Env/       # ADC battery voltage monitoring
+│   ├── Core/Src/main.c          # ADC battery monitoring code
+│   ├── RL_Brain/agent.py        # Battery threshold policy agent
+│   └── README.md                # Environment documentation
+│
+└── Temperature_Env/           # STTS22H temperature sensor (PARTIAL)
+    ├── Core/Src/main.c          # Temperature sensor firmware
     └── README.md                # Environment documentation
 ```
 

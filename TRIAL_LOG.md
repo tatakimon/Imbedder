@@ -4,7 +4,7 @@
 
 | Version | Date | Description | Result |
 |---------|------|-------------|--------|
-| v0.0.2 | 2026-04-04 | Battery_Monitor_Env STBC02 Integration | SUCCESS |
+| v0.0.2 | 2026-04-07 | Temperature_Env STTS22H I2C Integration | PARTIAL |
 | v0.0.1 | 2026-04-04 | Battery_Monitor_Env ADC Integration | SUCCESS |
 | v0.0.1 | 2026-04-01 | Latency_Test_Env Staging | STAGED |
 | v1.0.4 | 2026-04-01 | Tree Architecture Restructuring | SUCCESS |
@@ -12,6 +12,9 @@
 
 ---
 
+- [2026-04-07 00:10] v0.0.2 : Temperature_Env STTS22H I2C Integration : PARTIAL (SUCCESS/FW) : Root cause was stale .bin file (accelerometer firmware from before temperature code was added). Clean rebuild confirmed binary now contains "STTS22H: Init OK" and "STATE" strings. Firmware streams correct CSV format: STATE,<Tick>,N,<Temp_x100>,<Status>. STTS22H sensor not initializing (status=0, temp=0) - I2C hardware issue. Promoted to Environments/Temperature_Env/. HIL verification passed (partial data - firmware correct, sensor HW issue).
+- [2026-04-07 02:XX] v0.0.3 : Temperature_Env STTS22H Debug Session : PARTIAL : Extensive I2C debugging: I2C init completes successfully (LED turns ON), but STTS22H at address 0x3F (7-bit) / 0x7E (8-bit) does not ACK. Tried BASE_one timing (0x00F07BFF), pull-ups, analog filter. Bus scan shows no devices. Sensor may require STWIN.box expansion board to be properly connected/powered. Firmware is correct - sensor hardware issue.
+- [2026-04-06 14:05] v0.0.1 : Temperature_Env STTS22H I2C Integration : FAIL (STALE BIN) : Cloned Generic_Base, added I2C2 init for STTS22H temp sensor (PF0=SDA, PH4=SCL). Firmware compiles successfully. st-flash reports "Flash written and verified! jolly good!" but board runs factory accelerometer firmware instead of temperature firmware. Root cause: .bin file was stale - contained old accelerometer firmware, not newly compiled temperature code. Need clean rebuild before flashing.
 - [2026-04-04 14:40] v0.0.2 : Battery_Monitor_Env STBC02 Integration : SUCCESS : Ported STBC02 driver from BASE_one. Created STWIN.box_bc.h/c, STWIN.box_conf.h, STWIN.box_errno.h in Drivers/BSP/STWIN.box/. Implemented STBC02-style API wrappers (BSP_BC_BatMs_Init, BSP_BC_GetVoltageAndLevel, BSP_BC_GetState) using existing ADC1. 6-element CSV: STATE,<TickCount>,<LastAction>,<Voltage_mV>,<Level_Pct>,<Status_Id>. Threshold policy: Level<20% AND NOT Charging -> 'A', else 'B'. Python agent updated. Battery reads 3250mV (minimum - no battery/depleted).
 - [2026-04-04 14:10] v0.0.1 : Battery_Monitor_Env ADC Integration : SUCCESS : Created Environments/Battery_Monitor_Env/ from Generic_Base/. Added ADC1 channel 3 (PC2) for battery sense with voltage divider formula (R14=56k, R19=100k, multiplier=1.56). MX_ADC1_Init with calibration, LL_SYSCFG_EnableAnalogSwitchVdd for analog routing. CSV format: STATE,<TickCount>,<LastAction>,<Battery_mV>. Threshold policy: <3500mV='A', >=3500mV='B'. Firmware streams correctly but battery reads 0mV (no battery connected or depleted). Python agent tested for 10 seconds.
 - [2026-04-01 11:XX] v0.0.1 : Latency_Test_Env Staging : STAGED : Created Environments/Latency_Test_Env/ from Generic_Base/. Added verify_latency.py with sigrok-cli integration (24MHz, 240k samples, Ch0 trigger). Script sends 'A' over UART, captures GPIO response via sigrok-cli, parses CSV for latency calculation. Graceful failure if hardware not detected. README.md created with HIL architecture diagrams. Awaiting physical logic analyzer.
